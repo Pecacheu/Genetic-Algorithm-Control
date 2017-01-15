@@ -1,3 +1,6 @@
+//This work is licensed under a GNU General Public License. Visit http://gnu.org/licenses/gpl-3.0-standalone.html for details.
+//Genetic Control System Server. Copyright (©) 2016, Pecacheu (Bryce Peterson, bbryce.com)
+
 package com.pecacheu.genctrl;
 
 import java.awt.Color;
@@ -11,7 +14,9 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.Iterator;
+import java.util.Scanner;
 import java.util.TreeMap;
+import java.util.regex.Pattern;
 
 import javax.swing.JComponent;
 import javax.swing.JFrame;
@@ -26,6 +31,7 @@ public class Main extends JPanel {
 	static final int GEN_DELAY = 10000;
 	
 	//Server Vars:
+	private static final Scanner console = new Scanner(System.in);
 	static volatile ServerSocket server = null;
 	static volatile ChuList<Client> clients = new ChuList<Client>();
 	static volatile TreeMap<String,Status> status = new TreeMap<String,Status>();
@@ -69,15 +75,13 @@ public class Main extends JPanel {
 		
 		pingThread = new Thread(() -> { while(true) try { //Send keep-alive pings and broadcast packets:
 			synchronized(genSync) {
-				Client cli; for(int i=0,l=clients.size(); i<l; i++) {
-					cli = clients.get(i); if(!cli.pingLoop()) {
-						dbg("Connection to '"+cli.name+"' timed out!");
-						cli.close();
-					}
+				ChuIterator<Client> it = clients.chuIterator();
+				while(it.hasNext()) {
+					Client cli = it.next(); if(cli == null) continue;
+					if(!cli.pingLoop()) { dbg("Connection to '"+cli.name+"' timed out!"); cli.close(); }
 				}
 				if(!addPauseFlag) broadcast();
-				if(genFlag > 0) { genFlag--; if(genFlag
-				<= 0) { genFlag = 0; checkRun(false); }}
+				if(genFlag > 0) { genFlag--; if(genFlag <= 0) { genFlag = 0; checkRun(false); }}
 			}
 			sleep(10);
 		} catch(Exception e) { err("Ping thread error",e); }});
@@ -89,25 +93,30 @@ public class Main extends JPanel {
 	private static boolean loadConfig() {
 		try {
 			if(!ChuConf.confExists("config")) {
-				ChuConf.loadUnpack("config").save("config");
+				ChuConf.unpack("config"+ChuConf.EXT, null);
 				dbg("Saved example config. Please edit to match requirements."); return false;
+			} else if(ChuConf.confExists("output")) {
+				err("Output file 'output"+ChuConf.EXT+"' exists!"); return false;
 			}
 			
 			ChuConf config = ChuConf.load("config"); Object vProp = config.getProp("vars");
 			if(!(vProp instanceof ChuConfSection)) throw new Exception("Vars must be of type config section!");
 			
 			ChuIterator<Object> it = ((ChuConfSection)vProp).getPropList();
-			vars = new int[it.list.size()][2];
+			vars = new int[it.list.size()][3];
 			
 			while(it.hasNext()) {
 				Object prop = it.next();
 				if(!(prop instanceof ChuList<?>)) throw new Exception("Vars entry must be list!");
-				ChuList<?> list = (ChuList<?>)prop;
-				if(list.size() != 2) throw new Exception("Vars entry must be list of length 2!");
-				int min = (int)list.get(0), max = (int)list.get(1);
-				if(min >= max) throw new Exception("Vars entry "+(it.index+1)
-				+": Max ("+max+") must be greater than min ("+min+")!");
+				ChuList<?> list = (ChuList<?>)prop; int size = list.size();
+				if(size != 2 && size != 3) throw new Exception("Vars entry must be list of length 2 or 3!");
+				if(!(list.get(0) instanceof Integer)) throw new Exception("Vars entry must be list of Integer!");
+				
+				Integer min = (Integer)list.get(0), max = (Integer)list.get(1);
+				if(min >= max) throw new Exception("Vars entry "+(it.index+1)+": Max ("+max+") must be greater than min ("+min+")!");
+				
 				vars[it.index][0] = min; vars[it.index][1] = max;
+				vars[it.index][2] = (size==3)?(Integer)list.get(2):Integer.MIN_VALUE;
 			}
 		} catch(Exception e) { err("Could not load config",e); return false; }
 		return true;
@@ -142,15 +151,11 @@ public class Main extends JPanel {
 	
 	private static void runDisable() { synchronized(genSync) {
 		dbg("Stopping threads...");
-		cmdThread.stop(); cliThread.stop(); pingThread.stop();
-		dbg("Disabling server...");
+		cmdThread.stop(); cliThread.stop(); pingThread.stop(); console.close();
 		if(server != null) try {
 			dbg("Closing sockets...");
-			for(int i=0,l=clients.size(); i<l; i++) {
-				boolean cliCon = true; while(cliCon) try { clients.get(i).close();
-				cliCon = false; } catch(Exception e) { err("CLIENT-CLOSE-FAIL",e); }
-			}
-			server.close(); server = null;
+			ChuIterator<Client> it = clients.chuIterator(); while(it.hasNext()) it.next().close();
+			dbg("Disabling server."); server.close(); server = null;
 			if(window != null) { window.dispose(); window = null; }
 		} catch(Exception e) { err("Could not close server",e); return; }
 	}}
@@ -169,10 +174,7 @@ public class Main extends JPanel {
 	}
 	
 	public static String waitForCmdLine() {
-		String line = ""; try { while(true) { while(System.in.available() < 1) sleep(50); int c = System.in.read();
-		if(c == '\n' || c == '\r') break; if(c > 0 && c < 65535) line += fromCharCode(c); else break; }}
-		catch(Exception e) { err("Error while reading command line",e); System.exit(1); }
-		return line.length()!=0?line:null;
+		sleep(50); try { return console.nextLine(); } catch(Exception e) { return null; }
 	}
 	
 	//------ Genetic Algorithm Code:
@@ -181,10 +183,10 @@ public class Main extends JPanel {
 	private static Status swapA = new Status(null,true),
 	swapB = new Status(null,true), swapC = new Status(null,true);
 	
-	private static void initVars(Status stat) { //Generate random vars:
+	private static void initVars(Status stat) { //Set vars to initial state:
 		for(int i=0,l=vars.length; i<l; i++) {
-			int min = vars[i][0], max = vars[i][1];
-			stat.args.set(i, rand(min, max));
+			int min = vars[i][0], max = vars[i][1], init = vars[i][2];
+			stat.args.set(i, init==Integer.MIN_VALUE?rand(min, max):init);
 		}
 	}
 	
@@ -241,9 +243,11 @@ public class Main extends JPanel {
 		swapRun = 0; swapA.reset(); swapB.reset(); swapC.reset(); fRun = false;
 	}
 	
-	private static void finishGen(boolean delay) {
-		if(addPauseFlag) { addPauseFlag = false; dbg("Client Thread: Client ADD/REMOVE enabled."); }
-		resultsGUI(); if(delay) genFlag = GEN_DELAY/10; else runNextGen();
+	private static void finishGen(boolean delayed) {
+		if(delayed) {
+			if(addPauseFlag) { addPauseFlag = false; dbg("Client Thread: Client ADD/REMOVE enabled."); }
+			resultsGUI(); genFlag = GEN_DELAY/10;
+		} else runNextGen();
 	}
 	
 	private static void runNextGen() {
@@ -375,7 +379,7 @@ public class Main extends JPanel {
 			String args = stat.args.toString(), label = name+(stat.isFake?" (run by "+stat.cli.name+")":"")+", "+args+", Result: "+stat.result;
 			
 			//Add to results list:
-			results.push(name+"{*}"+args);
+			results.push(name+" -- "+args+" -> "+stat.result);
 			
 			//Display in GUI window:
 			GUIBar bar = new GUIBar(pane, new Point(20, (int)((i+1)/cl*100.f)), label);
@@ -393,16 +397,14 @@ public class Main extends JPanel {
 			ChuConf output; //Open/create file:
 			if(ChuConf.confExists("output")) output = ChuConf.load("output");
 			else output = new ChuConf();
-			
 			//Write data:
 			ChuConfSection data = new ChuConfSection();
-			results.forEach((res) -> {
-				String[] resData = res.split("{*}");
-				data.setProp(resData[0], resData[1]);
-			});
+			for(int i=results.size()-1; i>=0; i--) data.addProp(results.get(i));
+			//results.forEach((res) -> { data.addProp(res); });
+			//String[] resData = res.split(Pattern.quote("{*}"));
+			//ChuConf.KEY_CHECK.matcher(resData[0]).replaceAll("_");
 			output.setSection("gen"+genNum, data); output.save("output");
-			
-		} catch(Exception e) { err("Could not write results file",e); }
+		} catch(Exception e) { err("Error while writing results file",e); }
 	}}
 	
 	//------ Useful Functions:

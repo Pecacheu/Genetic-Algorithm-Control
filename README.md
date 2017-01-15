@@ -16,3 +16,5 @@ Put the client app on several computers and connect over local network, or just 
 
 You can assign this command to a hotkey in Ubuntu Keyboard Settings to launch the client quickly:  
 `gnome-terminal -t 'Genetic Client' --maximize -e 'python Desktop/genClient/GeneticClient.py'`
+
+#### Note: The server relies on broadcast packets to discover clients. Make sure broadcast is enabled on your router!

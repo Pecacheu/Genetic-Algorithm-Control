@@ -41,7 +41,8 @@ public class Client {
 	
 	public void close() { close(false); }
 	public void close(boolean noEvent) { synchronized(Main.genSync) {
-		try { thread.stop(); Main.clients.remove(this); if(!noEvent) reader.removed(); socket.close(); socket = null; }
+		Main.clients.remove(this);
+		try { thread.stop(); if(!noEvent) reader.removed(); socket.close(); }
 		catch(Exception e) { Main.err("Could not close socket!",e); }
 	}}
 	
